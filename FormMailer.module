@@ -19,7 +19,7 @@ class FormMailer extends WireData implements Module, ConfigurableModule
         return array(
             'title'        => 'Form Mailer',
             'summary'     => 'A form mailer using ProcessWire $input sanitization and the PHPMailer third party class.',
-            'version'     => 100,
+            'version'     => 101,
             'singular'    => false,
             'autoload'    => false
         );
