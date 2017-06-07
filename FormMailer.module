@@ -1,0 +1,371 @@
+<?php
+
+/**
+ * FormMailer
+ *
+ * created by Ryan Scherler @ East Slope Studio
+ * http://www.ryanscherler.com
+ *
+ * created by Sam Howat @ Avelient
+ * http://www.avelient.co
+ *
+ */
+
+class FormMailer extends WireData implements Module, ConfigurableModule
+{
+
+    public static function getModuleInfo()
+    {
+        return array(
+            'title'        => 'Form Mailer',
+            'summary'     => 'A form mailer using ProcessWire $input sanitization and the PHPMailer third party class.',
+            'version'     => 100,
+            'singular'    => false,
+            'autoload'    => false
+        );
+    }
+
+    /**
+     * User notices
+     *
+     */
+    public $notices = array();
+
+    /**
+     * User message type
+     *
+     */
+    protected $messageClass;
+
+    /**
+     * Where cache files are stored
+     *
+     */
+    protected $cachePath;
+
+    /**
+     * Items that may be specified as the first argument to the process() method
+     *
+     */
+    protected $options = array(
+        'fields' => array(),
+        'noticesOpen' => "<div class=\"notice {messageClass}\">",
+        'noticesClose'    => '</div> <!-- end .notice -->'
+    );
+
+    /**
+     * Define the cache path
+     * Should be done here in the construct rather than the init() because init() is not called on install/uninstall
+     *
+     */
+    public function __construct()
+    {
+        $this->cachePath = $this->config->paths->cache . $this->className() . '/';
+    }
+
+    /**
+     * Nothing to initialize, but must remain here
+     *
+     */
+    public function init()
+    {
+
+    }
+
+    /**
+     * Process Form
+     *
+     */
+    public function process(array $options)
+    {
+
+        $moduleData = wire('modules')->getModuleConfigData($this->className());
+        $options = array_merge($this->options, $options);
+
+        // inputs
+        $input = wire('input'); // posted fields
+        $attachments = array(); // uploaded files
+
+        if (count($input->post)) {
+            if ($this->verifyFormToken()) {
+                $sanitizer = wire('sanitizer');
+                foreach ($options['fields'] as $name => $attr) {
+                    switch ($attr['type']) {
+                        case 'file':
+                            $u = new WireUpload($name);
+                            $u->setMaxFiles($attr['maxFiles']);
+                            $u->setMaxFileSize(intval($attr['maxFileSize']) * 1024);
+                            $u->setOverwrite(false);
+                            $u->setDestinationPath($this->cachePath);
+                            $u->setValidExtensions($attr['extensions']);
+
+                            // execute uploads and check for errors
+                            $files = $u->execute();
+                            if ($u->getErrors()) {
+                                foreach ($u->getErrors() as $error) {
+                                    $this->notices[] = $error;
+                                }
+                            } else {
+                                foreach ($files as $filename) {
+                                    $attachments[] = $this->cachePath.$filename;
+                                }
+                            }
+                            break;
+
+                        case 'checkbox':
+                            $sanitized_input = $sanitizer->text(implode(", ", $input->post->$name));
+                            break;
+
+                        case 'email':
+                            $sanitized_input = $sanitizer->email($input->post->$name);
+                            break;
+
+                        default:
+                            $sanitized_input = $sanitizer->text($input->post->$name);
+                    }
+
+                    // Check for required & empty, otherwise add
+                    if ($attr['required'] && empty($input->post->$name)) {
+                        $this->notices[] = "Missing Required Field: {$attr['label']}";
+                    } else {
+                        $options['fields'][$name]['value'] = $sanitized_input;
+                    }
+
+                }
+
+                // if notices after validation, then errors found
+                if (count($this->notices)) {
+                    $this->messageClass = 'danger';
+                } else { // all looks good, proceed with sending email
+                    require 'phpmailer/class.phpmailer.php';
+                    $mail = new PHPMailer;
+
+                    // headers
+                    $mail->From = $options['from']['email'];
+                    $mail->FromName = $options['from']['name'];
+                    $mail->AddReplyTo($options['fields'][$options['replyTo'][1]]['value'], $options['fields'][$options['replyTo'][0]]['value']);
+                    foreach ($options['to'] as $user) {
+                        $mail->AddAddress($user['email'], $user['name']);
+                    }
+                    $mail->WordWrap = 50;
+                    $mail->IsHTML(true);
+                    $mail->Subject = $options['subject'];
+
+                    // SMTP settings from PW Module Admin Config
+                    if ($moduleData['isSMTP']) {
+                        $mail->IsSMTP(); // telling the class to use SMTP
+                        $mail->Host       = $moduleData['SMTPHost'];                         // SMTP server
+                        $mail->SMTPDebug  = $moduleData['SMTPDebug'];                         // enables SMTP debug information for testing (1 = errors and messages 2 = messages only)
+                        $mail->SMTPAuth   = ($moduleData['SMTPAuth']) ? true : false;        // enable SMTP authentication
+                        $mail->Host       = $moduleData['SMTPHost'];                         // sets the SMTP server
+                        $mail->Port       = $moduleData['SMTPPort'];                        // set the SMTP port
+                        $mail->Username   = $moduleData['SMTPUsername'];                     // SMTP account username
+                        $mail->Password   = $moduleData['SMTPPassword'];                    // SMTP account password
+                    }
+
+                    // compose HTML body
+                    $body = "<html>\n\t<body>\n";
+                    $body .= "\t\t<h1>{$mail->Subject}</h1>\n";
+                    $body .= "\t\t<ul>\n";
+                    foreach ($options['fields'] as $attr) {
+                        $body .= (!empty($attr['value'])) ? "\t\t\t<li><strong>{$attr['label']}</strong>: {$attr['value']}</li>\n" : '';
+                    }
+                    $body .= "\t\t</ul>\n";
+                    $body .= "\t</body>\n</html>";
+
+                    // Debug
+                    echo $body;
+
+                    $mail->Body = $body;
+                    $mail->AltBody = strip_tags($body);
+
+                    // add associated attachments from module cache
+                    foreach ($attachments as $attachment) {
+                        $mail->AddAttachment($attachment);
+                    }
+
+                    // send email
+                    if ($mail->Send()) {
+                        $this->messageClass = 'success';
+                        $this->notices[] = $options['successMessage'];
+                        $input->post->removeAll(); // clear POST object to reset the form
+                    } else {
+                        $this->messageClass = 'danger';
+                        $this->notices[] = $mail->ErrorInfo;
+                    }
+
+                }
+
+                // remove associated attachments from module cache to keep things tidy
+                foreach ($attachments as $attachment) {
+                    unlink($attachment);
+                }
+
+            } else {
+                $this->messageClass = 'danger';
+                $this->notices[] = 'Invalid form token.';
+            }
+
+        }
+
+        // Return
+        return $this->messageClass;
+
+    }
+
+    /**
+     * Show form notices as list within formatted message wrapper
+     *
+     */
+    public function notices()
+    {
+        $out = '';
+        if (count($this->notices)) {
+            $out .= str_replace('{messageClass}', $this->messageClass, $this->options['noticesOpen']);
+            foreach ($this->notices as $notice) {
+                $out .= "<p>$notice</p>";
+            }
+            $out .= $this->options['noticesClose'];
+        }
+        return $out;
+    }
+
+    /*
+     * Check posted form token against current session
+     */
+    private function verifyFormToken()
+    {
+
+        // check if a session is started and a token is transmitted, if not return an error
+        if (!isset($_SESSION[$this->className().'_token'])) {
+            return false;
+        }
+
+        // check if the form is sent with token in it
+        if (!isset($_POST['token'])) {
+            return false;
+        }
+
+        // compare the tokens against each other if they are still the same
+        if ($_SESSION[$this->className().'_token'] !== $_POST['token']) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /*
+     * Generate form token
+     */
+    public function generateFormToken()
+    {
+
+        // generate a token from an unique value, took from microtime, you can also use salt-values, other crypting methods...
+        $token = md5(uniqid(microtime(), true));
+
+        // Write the generated token to the session variable to check it against the hidden field when the form is sent
+        $_SESSION[$this->className().'_token'] = $token;
+
+        return $token;
+    }
+
+    public static function getModuleConfigInputfields(array $data)
+    {
+
+        $inputfields = new InputfieldWrapper();
+
+        // Enable SMTP?
+        $field = wire('modules')->get("InputfieldCheckbox");
+        $field->name = "isSMTP";
+        $field->label = "Use SMTP?";
+        $field->value = 1; // providing a "checked" value for the checkbox is necessary
+        $field->attr('checked', empty($data['isSMTP']) ? '' : 'checked');
+        $inputfields->add($field);
+
+        // SMTP Debug Level
+        $field = wire('modules')->get('InputfieldInteger');
+        $field->name = 'SMTPDebug';
+        $field->label = "SMTP Debug Level";
+        $field->description = 'Enables SMTP debug information for testing (1 = errors and messages and 2 = messages only)';
+        $field->value = (isset($data['SMTPDebug'])) ? $data['SMTPDebug'] : 0;
+        $inputfields->add($field);
+
+        // Use SMTP Authentication?
+        $field = wire('modules')->get("InputfieldCheckbox");
+        $field->name = "SMTPAuth";
+        $field->label = "Enable SMTP Authentication?";
+        $field->description = 'If enabled, ensure the following fields are filled in: Host, Port, Username, Password';
+        $field->value = 1; // providing a "checked" value for the checkbox is necessary
+        $field->attr('checked', empty($data['SMTPAuth']) ? '' : 'checked');
+        $inputfields->add($field);
+
+        // SMTP Host
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'SMTPHost';
+        $field->label = "SMTP Host";
+        if (isset($data['SMTPHost'])) {
+            $field->value = $data['SMTPHost'];
+        }
+        $inputfields->add($field);
+
+        // SMTP Port
+        $field = wire('modules')->get('InputfieldInteger');
+        $field->name = 'SMTPPort';
+        $field->label = "SMTP Port";
+        if (isset($data['SMTPPort'])) {
+            $field->value = $data['SMTPPort'];
+        }
+        $inputfields->add($field);
+
+        // SMTP Username
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'SMTPUsername';
+        $field->label = "SMTP Username";
+        if (isset($data['SMTPUsername'])) {
+            $field->value = $data['SMTPUsername'];
+        }
+        $inputfields->add($field);
+
+        // SMTP Password
+        $field = wire('modules')->get('InputfieldText');
+        $field->name = 'SMTPPassword';
+        $field->label = "SMTP Password";
+        if (isset($data['SMTPPassword'])) {
+            $field->value = $data['SMTPPassword'];
+        }
+        $inputfields->add($field);
+
+        return $inputfields;
+    }
+
+    /**
+     * Create a directory where we will store our cache files
+     *
+     */
+    public function ___install()
+    {
+        if (!$this->createCachePath()) {
+            throw new WireException("Unable to create directory: {$this->cachePath}");
+        }
+    }
+
+    /**
+     * Remove cache files and directory
+     *
+     */
+    public function ___uninstall()
+    {
+        if (is_dir($this->cachePath)) {
+            wireRmdir($this->cachePath, true);
+        }
+    }
+
+    protected function createCachePath()
+    {
+        $path = $this->cachePath;
+        if (!is_dir($path) && !wireMkdir($path)) {
+            return false;
+        }
+        return true;
+    }
+}
