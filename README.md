@@ -10,3 +10,7 @@ This module allows ProcessWire users to easily extend email functionality  using
 # Setup Instructions
 
 * Coming Soon
+
+## Credits
+
+Original developed by Ryan Scherler 
