@@ -174,7 +174,7 @@ class FormMailer extends WireData implements Module, ConfigurableModule
                     $body .= "\t</body>\n</html>";
 
                     // Debug
-                    echo $body;
+                    //echo $body;
 
                     $mail->Body = $body;
                     $mail->AltBody = strip_tags($body);
